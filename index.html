@@ -181,13 +181,14 @@
               <i data-lucide="wallet" class="w-4 h-4 text-white"></i>
             </div>
             <div class="min-w-0">
-              <h2 id="page-title" class="font-display font-bold text-lg sm:text-xl text-white truncate">Resumen Financiero</h2>
-              <p id="page-subtitle" class="text-xs text-slate-400 truncate">Control semanal y flujo de dinero</p>
-            </div>
-          </div>
-
-          <!-- Selector de Mes y Acción Rápida -->
+          <!-- Selector de Mes, Estado Sync y Acción Rápida -->
           <div class="flex items-center gap-2 sm:gap-3 shrink-0">
+            <!-- Indicador visual de sincronización -->
+            <button id="header-sync-pill" onclick="handleHeaderSyncClick()" title="Estado de sincronización con Google Sheets" class="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-slate-900/90 border border-slate-800 text-[11px] sm:text-xs font-semibold text-slate-400 hover:border-slate-700 transition">
+              <span id="header-sync-dot" class="w-2 h-2 rounded-full bg-slate-500"></span>
+              <span id="header-sync-text" class="hidden xs:inline sm:inline">Solo local</span>
+            </button>
+
             <div class="flex items-center bg-slate-900/90 border border-slate-800 rounded-xl px-2.5 py-1.5 gap-1.5">
               <button onclick="changeMonth(-1)" class="p-1 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition" aria-label="Mes anterior">
                 <i data-lucide="chevron-left" class="w-4 h-4"></i>
@@ -578,14 +579,30 @@
               </div>
             </div>
 
-            <div class="flex flex-wrap items-center gap-3 pt-1">
+            <!-- Switch de Sincronización Automática -->
+            <div class="flex items-center justify-between gap-3 p-3.5 rounded-2xl bg-slate-900/70 border border-slate-800">
+              <div>
+                <p class="text-xs sm:text-sm font-bold text-white">Sincronización automática (Bidireccional)</p>
+                <p class="text-[11px] sm:text-xs text-slate-400 mt-0.5">Sube cambios automáticamente tras 1.5s y descarga novedades al abrir la app.</p>
+              </div>
+              <label class="relative inline-flex items-center cursor-pointer shrink-0">
+                <input id="sync-auto-toggle" type="checkbox" onchange="toggleAutoSync()" class="sr-only peer" checked />
+                <div class="w-11 h-6 bg-slate-700 rounded-full peer peer-checked:bg-emerald-500 after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:after:translate-x-full"></div>
+              </label>
+            </div>
+
+            <div class="flex flex-wrap items-center gap-2.5 sm:gap-3 pt-1">
               <button onclick="saveSyncConfig()" class="px-4 py-2.5 rounded-xl bg-indigo-500 hover:bg-indigo-400 text-white text-xs sm:text-sm font-semibold transition flex items-center gap-2">
                 <i data-lucide="save" class="w-4 h-4"></i>
                 <span>Guardar Configuración</span>
               </button>
-              <button id="btn-sync-now" onclick="syncWithGoogleSheets()" class="px-4 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-400 hover:to-cyan-400 text-slate-950 text-xs sm:text-sm font-bold transition flex items-center gap-2 shadow-lg shadow-emerald-500/20">
-                <i data-lucide="refresh-cw" class="w-4 h-4"></i>
-                <span>Probar y Sincronizar con Sheets</span>
+              <button id="btn-sync-push" onclick="pushToGoogleSheets(true)" class="px-4 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-400 hover:to-cyan-400 text-slate-950 text-xs sm:text-sm font-bold transition flex items-center gap-2 shadow-lg shadow-emerald-500/20">
+                <i data-lucide="cloud-upload" class="w-4 h-4"></i>
+                <span>Subir ahora</span>
+              </button>
+              <button id="btn-sync-pull" onclick="pullFromGoogleSheets(true)" class="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs sm:text-sm font-semibold transition flex items-center gap-2">
+                <i data-lucide="cloud-download" class="w-4 h-4"></i>
+                <span>Descargar ahora</span>
               </button>
             </div>
 
@@ -873,6 +890,7 @@
         { name: 'Gastos Hormiga', icon: 'coffee', color: '#F43F5E' },
         { name: 'Aseo / Personal', icon: 'sparkles', color: '#EC4899' },
         { name: 'Servicios / Suscripciones', icon: 'wifi', color: '#8B5CF6' },
+        { name: 'Salud', icon: 'heart-pulse', color: '#10B981' },
         { name: 'Compras', icon: 'shopping-cart', color: '#14B8A6' },
         { name: 'Entretenimiento', icon: 'gamepad-2', color: '#FB923C' },
         { name: 'Otros', icon: 'tag', color: '#94A3B8' }
@@ -894,7 +912,8 @@
     ];
 
     const APPS_SCRIPT_TEMPLATE = `// ============================================================
-// FinanzApp — Backend Google Apps Script (API para Google Sheets)
+// FinanzApp — Backend Google Apps Script (Bidireccional)
+// Compatible con hojas: Movimientos, Presupuesto y Metas
 // ============================================================
 const SECRET_TOKEN = "TU_TOKEN_SECRETO";
 
@@ -904,22 +923,71 @@ function doGet(e) {
       return jsonResponse({ ok: false, error: "Token inválido" });
     }
     const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+    // 1. Leer Movimientos
     const txSheet = getOrCreateSheet(ss, "Movimientos", ["id", "type", "amount", "date", "category", "note", "isFixed"]);
-    const rows = txSheet.getDataRange().getValues();
+    const txRows = txSheet.getDataRange().getValues();
     const transactions = [];
-    for (let i = 1; i < rows.length; i++) {
-      if (!rows[i][0]) continue;
+    for (let i = 1; i < txRows.length; i++) {
+      if (!txRows[i][0]) continue;
+      let dateVal = txRows[i][3];
+      if (dateVal instanceof Date) {
+        dateVal = Utilities.formatDate(dateVal, Session.getScriptTimeZone(), "yyyy-MM-dd");
+      }
       transactions.push({
-        id: String(rows[i][0]),
-        type: String(rows[i][1]),
-        amount: Number(rows[i][2]),
-        date: String(rows[i][3]),
-        category: String(rows[i][4]),
-        note: String(rows[i][5]),
-        isFixed: rows[i][6] === true || rows[i][6] === "TRUE"
+        id: String(txRows[i][0]),
+        type: String(txRows[i][1]),
+        amount: Number(txRows[i][2]) || 0,
+        date: String(dateVal),
+        category: String(txRows[i][4]),
+        note: String(txRows[i][5] || ""),
+        isFixed: txRows[i][6] === true || String(txRows[i][6]).toUpperCase() === "TRUE"
       });
     }
-    return jsonResponse({ ok: true, transactions: transactions });
+
+    // 2. Leer Metas
+    const goalsSheet = getOrCreateSheet(ss, "Metas", ["id", "name", "target", "saved", "icon", "color"]);
+    const goalRows = goalsSheet.getDataRange().getValues();
+    const goals = [];
+    for (let i = 1; i < goalRows.length; i++) {
+      if (!goalRows[i][0]) continue;
+      goals.push({
+        id: String(goalRows[i][0]),
+        name: String(goalRows[i][1]),
+        target: Number(goalRows[i][2]) || 0,
+        saved: Number(goalRows[i][3]) || 0,
+        icon: String(goalRows[i][4] || "smartphone"),
+        color: String(goalRows[i][5] || "#10B981")
+      });
+    }
+
+    // 3. Leer Presupuesto
+    const budgetSheet = getOrCreateSheet(ss, "Presupuesto", ["clave", "valor"]);
+    const budgetRows = budgetSheet.getDataRange().getValues();
+    let budget = null;
+    if (budgetRows.length > 1) {
+      const map = {};
+      for (let i = 1; i < budgetRows.length; i++) {
+        if (budgetRows[i][0]) map[String(budgetRows[i][0])] = budgetRows[i][1];
+      }
+      if (map.monthlyIncomeBase !== undefined) {
+        let fixedItems = [];
+        try { fixedItems = JSON.parse(map.fixedItems || "[]"); } catch (_) {}
+        budget = {
+          monthlyIncomeBase: Number(map.monthlyIncomeBase) || 0,
+          weeklyVariableMonthlyBudget: Number(map.weeklyVariableMonthlyBudget) || 0,
+          fixedItems: fixedItems
+        };
+      }
+    }
+
+    return jsonResponse({
+      ok: true,
+      hasData: transactions.length > 0 || goals.length > 0 || budget !== null,
+      transactions: transactions,
+      goals: goals,
+      budget: budget
+    });
   } catch (err) {
     return jsonResponse({ ok: false, error: err.message });
   }
@@ -932,24 +1000,43 @@ function doPost(e) {
       return jsonResponse({ ok: false, error: "Token inválido" });
     }
     const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+    // 1. Guardar Movimientos
     const txSheet = getOrCreateSheet(ss, "Movimientos", ["id", "type", "amount", "date", "category", "note", "isFixed"]);
-    const goalsSheet = getOrCreateSheet(ss, "Metas", ["id", "name", "target", "saved", "icon"]);
-
-    // Sobrescribir Movimientos con el estado sincronizado
     txSheet.clearContents();
-    txSheet.appendRow(["id", "type", "amount", "date", "category", "note", "isFixed"]);
+    const txData = [["id", "type", "amount", "date", "category", "note", "isFixed"]];
     (body.transactions || []).forEach(tx => {
-      txSheet.appendRow([tx.id, tx.type, tx.amount, tx.date, tx.category, tx.note, tx.isFixed]);
+      txData.push([tx.id, tx.type, Number(tx.amount) || 0, "'" + tx.date, tx.category, tx.note || "", Boolean(tx.isFixed)]);
     });
+    txSheet.getRange(1, 1, txData.length, txData[0].length).setValues(txData);
 
-    // Sobrescribir Metas
+    // 2. Guardar Metas
+    const goalsSheet = getOrCreateSheet(ss, "Metas", ["id", "name", "target", "saved", "icon", "color"]);
     goalsSheet.clearContents();
-    goalsSheet.appendRow(["id", "name", "target", "saved", "icon"]);
+    const goalData = [["id", "name", "target", "saved", "icon", "color"]];
     (body.goals || []).forEach(g => {
-      goalsSheet.appendRow([g.id, g.name, g.target, g.saved, g.icon]);
+      goalData.push([g.id, g.name, Number(g.target) || 0, Number(g.saved) || 0, g.icon || "smartphone", g.color || "#10B981"]);
     });
+    goalsSheet.getRange(1, 1, goalData.length, goalData[0].length).setValues(goalData);
 
-    return jsonResponse({ ok: true, syncedCount: (body.transactions || []).length });
+    // 3. Guardar Presupuesto
+    if (body.budget) {
+      const budgetSheet = getOrCreateSheet(ss, "Presupuesto", ["clave", "valor"]);
+      budgetSheet.clearContents();
+      const budgetData = [
+        ["clave", "valor"],
+        ["monthlyIncomeBase", Number(body.budget.monthlyIncomeBase) || 0],
+        ["weeklyVariableMonthlyBudget", Number(body.budget.weeklyVariableMonthlyBudget) || 0],
+        ["fixedItems", JSON.stringify(body.budget.fixedItems || [])]
+      ];
+      budgetSheet.getRange(1, 1, budgetData.length, 2).setValues(budgetData);
+    }
+
+    return jsonResponse({
+      ok: true,
+      syncedCount: (body.transactions || []).length,
+      timestamp: new Date().toISOString()
+    });
   } catch (err) {
     return jsonResponse({ ok: false, error: err.message });
   }
@@ -983,58 +1070,15 @@ function jsonResponse(obj) {
     let doughnutChartInstance = null;
     let pendingConfirmCallback = null;
 
-    /* =====================================================================
-       GENERACIÓN DE DATOS DEMO REALISTAS PARA EL MES ACTUAL
-    ===================================================================== */
-    function buildDemoState() {
-      const now = new Date();
-      const y = now.getFullYear();
-      const m = String(now.getMonth() + 1).padStart(2, '0');
-      const d = (day) => `${y}-${m}-${String(day).padStart(2, '0')}`;
-
-      return {
-        isDemo: true,
-        budget: {
-          monthlyIncomeBase: 1500,
-          weeklyVariableMonthlyBudget: 400, // S/ 100 base por semana
-          fixedItems: [
-            { id: 'fx-1', name: 'Alquiler', amount: 250 },
-            { id: 'fx-2', name: 'Alimentación', amount: 134 },
-            { id: 'fx-3', name: 'Pasajes mensuales', amount: 64 },
-            { id: 'fx-4', name: 'Aseo y varios', amount: 28 }
-          ]
-        },
-        goals: [
-          { id: 'g-1', name: 'Celular Nuevo', target: 1800, saved: 450, icon: 'smartphone', color: '#06B6D4' },
-          { id: 'g-2', name: 'Boda', target: 15000, saved: 1200, icon: 'heart', color: '#F43F5E' },
-          { id: 'g-3', name: 'Fondo de Emergencia', target: 3000, saved: 800, icon: 'shield', color: '#10B981' }
-        ],
-        transactions: [
-          // Semana 1 (Días 1-7): Ingreso + Alquiler fijo + S/ 72 variables -> Sobran S/ 28 para Sem 2
-          { id: 'tx-1', type: 'income', amount: 1500, date: d(1), category: 'Sueldo', note: 'Sueldo mensual', isFixed: false },
-          { id: 'tx-2', type: 'expense', amount: 250, date: d(2), category: 'Alquiler', note: 'Pago mensual departamento', isFixed: true },
-          { id: 'tx-3', type: 'expense', amount: 42, date: d(3), category: 'Alimentación', note: 'Compras del mercado', isFixed: false },
-          { id: 'tx-4', type: 'expense', amount: 16, date: d(4), category: 'Pasajes', note: 'Recarga corredor y metropolitano', isFixed: false },
-          { id: 'tx-5', type: 'expense', amount: 14, date: d(6), category: 'Gastos Hormiga', note: 'Café y snack de tarde', isFixed: false },
-
-          // Semana 2 (Días 8-14): Disponible 100 + 28 = 128. Gasta S/ 86 -> Sobran S/ 42 para Sem 3
-          { id: 'tx-6', type: 'expense', amount: 48, date: d(9), category: 'Alimentación', note: 'Menús de la semana', isFixed: false },
-          { id: 'tx-7', type: 'expense', amount: 22, date: d(11), category: 'Aseo / Personal', note: 'Shampoo y artículos de aseo', isFixed: false },
-          { id: 'tx-8', type: 'expense', amount: 16, date: d(13), category: 'Pasajes', note: 'Movilidad semanal', isFixed: false },
-
-          // Semana 3 (Días 15-21): Disponible 100 + 42 = 142. Gasta S/ 112 -> Sobran S/ 30 para Sem 4
-          { id: 'tx-9', type: 'income', amount: 180, date: d(15), category: 'Freelance / Extra', note: 'Diseño de presentación extra', isFixed: false },
-          { id: 'tx-10', type: 'expense', amount: 55, date: d(16), category: 'Entretenimiento', note: 'Cine y cena de fin de semana', isFixed: false },
-          { id: 'tx-11', type: 'expense', amount: 38, date: d(18), category: 'Alimentación', note: 'Supermercado semanal', isFixed: false },
-          { id: 'tx-12', type: 'expense', amount: 19, date: d(20), category: 'Gastos Hormiga', note: 'Helados y antojos', isFixed: false },
-
-          // Semana 4 (Días 22-31): Disponible 100 + 30 = 130. Gasta S/ 52 -> Quedan S/ 78 disponibles
-          { id: 'tx-13', type: 'expense', amount: 34, date: d(22), category: 'Alimentación', note: 'Almuerzos y frutas', isFixed: false },
-          { id: 'tx-14', type: 'expense', amount: 18, date: d(23), category: 'Gastos Hormiga', note: 'Café frío y galletas', isFixed: false }
-        ],
+    // Control de sincronización automática
+    let autoPushTimer = null;
+    let isSyncInFlight = false;
+    let currentSyncStatus = 'local'; // 'local' | 'synced' | 'saving' | 'loading' | 'error'
+    let lastPullTimestamp = 0;
         syncConfig: {
           scriptUrl: '',
           token: '',
+          autoSync: true,
           lastSync: null
         }
       };
@@ -1047,6 +1091,11 @@ function jsonResponse(obj) {
           const parsed = JSON.parse(raw);
           if (parsed && parsed.budget && Array.isArray(parsed.transactions)) {
             appState = parsed;
+            if (!appState.syncConfig) {
+              appState.syncConfig = { scriptUrl: '', token: '', autoSync: true, lastSync: null };
+            } else if (typeof appState.syncConfig.autoSync !== 'boolean') {
+              appState.syncConfig.autoSync = true;
+            }
             return;
           }
         }
@@ -1054,14 +1103,17 @@ function jsonResponse(obj) {
         console.error('Error cargando localStorage:', e);
       }
       appState = buildDemoState();
-      saveState();
+      saveState(false);
     }
 
-    function saveState() {
+    function saveState(triggerAutoPush = false) {
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(appState));
       } catch (e) {
         console.error('Error guardando localStorage:', e);
+      }
+      if (triggerAutoPush) {
+        scheduleAutoPush();
       }
     }
 
@@ -1748,13 +1800,13 @@ function jsonResponse(obj) {
         name: 'Nuevo gasto fijo',
         amount: 0
       });
-      saveState();
+      saveState(true);
       renderAll();
     }
 
     function removeFixedBudgetRow(id) {
       appState.budget.fixedItems = appState.budget.fixedItems.filter(i => i.id !== id);
-      saveState();
+      saveState(true);
       renderAll();
       showToast('Rubro fijo eliminado', 'info');
     }
@@ -1776,7 +1828,7 @@ function jsonResponse(obj) {
       appState.budget.monthlyIncomeBase = inc;
       appState.budget.weeklyVariableMonthlyBudget = varBud;
       appState.budget.fixedItems = updatedFixed;
-      saveState();
+      saveState(true);
       renderAll();
       showToast('Presupuesto mensual actualizado', 'success');
     }
@@ -1842,7 +1894,7 @@ function jsonResponse(obj) {
       };
 
       appState.transactions.unshift(newTx);
-      saveState();
+      saveState(true);
 
       // Cambiar al mes del movimiento si es diferente
       const [y, m] = date.split('-').map(Number);
@@ -1863,7 +1915,7 @@ function jsonResponse(obj) {
         'Esta acción eliminará el registro y recalculará tu presupuesto semanal.',
         () => {
           appState.transactions = appState.transactions.filter(t => t.id !== id);
-          saveState();
+          saveState(true);
           renderAll();
           showToast('Movimiento eliminado', 'info');
         }
@@ -1944,58 +1996,11 @@ function jsonResponse(obj) {
         showToast('Nueva meta creada', 'success');
       }
 
-      saveState();
+      saveState(true);
       closeModal('goal-modal');
       renderAll();
     }
-
-    function openGoalAdjustModal(goalId, mode) {
-      const g = appState.goals.find(x => x.id === goalId);
-      if (!g) return;
-      document.getElementById('adjust-goal-id').value = goalId;
-      document.getElementById('adjust-goal-mode').value = mode;
-      document.getElementById('adjust-goal-amount').value = '';
-
-      const title = document.getElementById('goal-adjust-title');
-      const subtitle = document.getElementById('goal-adjust-subtitle');
-      const submitBtn = document.getElementById('adjust-goal-submit');
-
-      if (mode === 'add') {
-        title.textContent = `Abonar a "${g.name}"`;
-        subtitle.textContent = `Ahorro actual: ${formatPEN(g.saved)} de ${formatPEN(g.target)}`;
-        submitBtn.className = 'w-full py-3 rounded-2xl font-display font-bold text-sm text-slate-950 bg-emerald-500 hover:bg-emerald-400 transition';
-        submitBtn.textContent = 'Confirmar Abono';
-      } else {
-        title.textContent = `Retirar de "${g.name}"`;
-        subtitle.textContent = `Disponible para retirar: ${formatPEN(g.saved)}`;
-        submitBtn.className = 'w-full py-3 rounded-2xl font-display font-bold text-sm text-white bg-rose-500 hover:bg-rose-400 transition';
-        submitBtn.textContent = 'Confirmar Retiro';
-      }
-      openModal('goal-adjust-modal');
-      setTimeout(() => document.getElementById('adjust-goal-amount').focus(), 100);
-    }
-
-    function setAdjustQuickAmount(val) {
-      document.getElementById('adjust-goal-amount').value = val;
-    }
-
-    function handleAdjustGoal(e) {
-      e.preventDefault();
-      const id = document.getElementById('adjust-goal-id').value;
-      const mode = document.getElementById('adjust-goal-mode').value;
-      const amt = parseFloat(document.getElementById('adjust-goal-amount').value) || 0;
-      const g = appState.goals.find(x => x.id === id);
-      if (!g || amt <= 0) return;
-
-      if (mode === 'add') {
-        g.saved = Number(g.saved) + amt;
-        showToast(`Abonaste ${formatPEN(amt)} a ${g.name}`, 'success');
-      } else {
-        g.saved = Math.max(0, Number(g.saved) - amt);
-        showToast(`Retiraste ${formatPEN(amt)} de ${g.name}`, 'info');
-      }
-
-      saveState();
+      saveState(true);
       closeModal('goal-adjust-modal');
       renderAll();
     }
@@ -2008,7 +2013,7 @@ function jsonResponse(obj) {
         'Se eliminará esta meta de ahorro de tu panel.',
         () => {
           appState.goals = appState.goals.filter(x => x.id !== id);
-          saveState();
+          saveState(true);
           renderAll();
           showToast('Meta eliminada', 'info');
         }
@@ -2016,31 +2021,118 @@ function jsonResponse(obj) {
     }
 
     /* =====================================================================
-       SINCRONIZACIÓN GOOGLE SHEETS, CSV Y DATOS DEMO
+       SINCRONIZACIÓN AUTOMÁTICA BIDIRECCIONAL CON GOOGLE SHEETS
     ===================================================================== */
+    function isSyncConfigured() {
+      const cfg = appState.syncConfig || {};
+      return Boolean(cfg.scriptUrl && cfg.scriptUrl.trim() && cfg.token && cfg.token.trim());
+    }
+
+    function updateSyncIndicator(status) {
+      currentSyncStatus = status;
+      const headerPill = document.getElementById('header-sync-pill');
+      const headerDot = document.getElementById('header-sync-dot');
+      const headerText = document.getElementById('header-sync-text');
+      const sideDot = document.getElementById('sidebar-sync-dot');
+      const sideText = document.getElementById('sidebar-sync-text');
+      const badge = document.getElementById('sync-status-badge');
+
+      const styles = {
+        local: {
+          pillClass: 'inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-slate-900/90 border border-slate-800 text-[11px] sm:text-xs font-semibold text-slate-400 hover:border-slate-700 transition',
+          dotClass: 'w-2 h-2 rounded-full bg-slate-500',
+          label: 'Solo local',
+          sideLabel: 'Solo local',
+          badgeClass: 'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-slate-800 text-slate-300 border border-slate-700 self-start sm:self-auto',
+          badgeText: 'Sin configurar (Solo local)'
+        },
+        synced: {
+          pillClass: 'inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-[11px] sm:text-xs font-semibold text-emerald-300 hover:bg-emerald-500/15 transition',
+          dotClass: 'w-2 h-2 rounded-full bg-emerald-400',
+          label: 'Sincronizado',
+          sideLabel: 'Sincronizado',
+          badgeClass: 'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 self-start sm:self-auto',
+          badgeText: 'Conectado y sincronizado'
+        },
+        saving: {
+          pillClass: 'inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-amber-500/15 border border-amber-500/35 text-[11px] sm:text-xs font-semibold text-amber-300 transition',
+          dotClass: 'w-2 h-2 rounded-full bg-amber-400 animate-ping',
+          label: 'Guardando...',
+          sideLabel: 'Guardando...',
+          badgeClass: 'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-amber-500/15 text-amber-300 border border-amber-500/30 self-start sm:self-auto',
+          badgeText: 'Guardando en Google Sheets...'
+        },
+        loading: {
+          pillClass: 'inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-amber-500/15 border border-amber-500/35 text-[11px] sm:text-xs font-semibold text-amber-300 transition',
+          dotClass: 'w-2 h-2 rounded-full bg-amber-400 animate-pulse',
+          label: 'Cargando...',
+          sideLabel: 'Cargando...',
+          badgeClass: 'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-amber-500/15 text-amber-300 border border-amber-500/30 self-start sm:self-auto',
+          badgeText: 'Descargando desde Sheets...'
+        },
+        error: {
+          pillClass: 'inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-rose-500/15 border border-rose-500/40 text-[11px] sm:text-xs font-semibold text-rose-300 hover:bg-rose-500/25 transition cursor-pointer',
+          dotClass: 'w-2 h-2 rounded-full bg-rose-400',
+          label: 'Error de sync',
+          sideLabel: 'Error de sync',
+          badgeClass: 'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-rose-500/15 text-rose-300 border border-rose-500/30 self-start sm:self-auto',
+          badgeText: 'Error de sincronización'
+        }
+      };
+
+      const s = styles[status] || styles.local;
+      if (headerPill) {
+        headerPill.className = s.pillClass;
+        headerDot.className = s.dotClass;
+        headerText.textContent = s.label;
+      }
+      if (sideDot && sideText) {
+        sideDot.className = s.dotClass;
+        sideText.textContent = s.sideLabel;
+      }
+      if (badge) {
+        badge.className = s.badgeClass;
+        badge.innerHTML = `<span class="${s.dotClass}"></span> ${s.badgeText}`;
+      }
+    }
+
+    function handleHeaderSyncClick() {
+      if (currentSyncStatus === 'error') {
+        pushToGoogleSheets(true);
+      } else {
+        switchTab('sync');
+      }
+    }
+
+    function scheduleAutoPush() {
+      if (!isSyncConfigured() || !appState.syncConfig.autoSync) {
+        updateSyncIndicator(isSyncConfigured() ? currentSyncStatus : 'local');
+        return;
+      }
+      if (autoPushTimer) clearTimeout(autoPushTimer);
+      updateSyncIndicator('saving');
+      autoPushTimer = setTimeout(() => {
+        autoPushTimer = null;
+        pushToGoogleSheets(false);
+      }, 1500);
+    }
+
     function renderSyncTab() {
-      const cfg = appState.syncConfig || { scriptUrl: '', token: '', lastSync: null };
+      const cfg = appState.syncConfig || { scriptUrl: '', token: '', autoSync: true, lastSync: null };
       const urlInput = document.getElementById('sync-url-input');
       const tokenInput = document.getElementById('sync-token-input');
+      const autoToggle = document.getElementById('sync-auto-toggle');
 
       if (document.activeElement !== urlInput) urlInput.value = cfg.scriptUrl || '';
       if (document.activeElement !== tokenInput) tokenInput.value = cfg.token || '';
+      if (autoToggle) autoToggle.checked = cfg.autoSync !== false;
 
-      const isConfigured = Boolean(cfg.scriptUrl && cfg.token);
-      const badge = document.getElementById('sync-status-badge');
-      const sideDot = document.getElementById('sidebar-sync-dot');
-      const sideText = document.getElementById('sidebar-sync-text');
-
-      if (isConfigured) {
-        badge.className = 'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 self-start sm:self-auto';
-        badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-emerald-400"></span> Conectado a Google Sheets`;
-        sideDot.className = 'w-2 h-2 rounded-full bg-emerald-400';
-        sideText.textContent = 'Sheets Listo';
+      if (!isSyncConfigured()) {
+        updateSyncIndicator('local');
+      } else if (currentSyncStatus === 'local') {
+        updateSyncIndicator('synced');
       } else {
-        badge.className = 'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-amber-500/15 text-amber-300 border border-amber-500/30 self-start sm:self-auto';
-        badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-amber-400"></span> Sin configurar (Modo Local)`;
-        sideDot.className = 'w-2 h-2 rounded-full bg-amber-400';
-        sideText.textContent = 'Modo Local';
+        updateSyncIndicator(currentSyncStatus);
       }
 
       document.getElementById('last-sync-info').textContent = cfg.lastSync
@@ -2050,32 +2142,48 @@ function jsonResponse(obj) {
       document.getElementById('apps-script-code').textContent = APPS_SCRIPT_TEMPLATE;
     }
 
+    function toggleAutoSync() {
+      const checked = document.getElementById('sync-auto-toggle').checked;
+      appState.syncConfig.autoSync = checked;
+      saveState(false);
+      showToast(checked ? 'Sincronización automática activada' : 'Sincronización automática pausada', 'info');
+    }
+
     function saveSyncConfig() {
       const scriptUrl = document.getElementById('sync-url-input').value.trim();
       const token = document.getElementById('sync-token-input').value.trim();
+      const autoSync = document.getElementById('sync-auto-toggle').checked;
 
       appState.syncConfig = {
         ...appState.syncConfig,
         scriptUrl,
-        token
+        token,
+        autoSync
       };
-      saveState();
+      saveState(false);
+      updateSyncIndicator(isSyncConfigured() ? 'synced' : 'local');
       renderSyncTab();
       showToast('Configuración de Sheets guardada', 'success');
     }
 
-    async function syncWithGoogleSheets() {
-      saveSyncConfig();
-      const { scriptUrl, token } = appState.syncConfig;
-      if (!scriptUrl || !token) {
-        showToast('Ingresa la URL de Apps Script y tu Token Secreto primero', 'error');
+    async function pushToGoogleSheets(isManual = false) {
+      if (isManual) saveSyncConfig();
+      if (!isSyncConfigured()) {
+        if (isManual) showToast('Ingresa la URL de Apps Script y tu Token Secreto primero', 'error');
+        updateSyncIndicator('local');
         return;
       }
 
-      const btn = document.getElementById('btn-sync-now');
-      btn.disabled = true;
-      btn.innerHTML = `<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i><span>Sincronizando...</span>`;
-      if (window.lucide) lucide.createIcons();
+      const { scriptUrl, token } = appState.syncConfig;
+      const btn = document.getElementById('btn-sync-push');
+      isSyncInFlight = true;
+      updateSyncIndicator('saving');
+
+      if (isManual && btn) {
+        btn.disabled = true;
+        btn.innerHTML = `<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i><span>Subiendo...</span>`;
+        if (window.lucide) lucide.createIcons();
+      }
 
       try {
         const response = await fetch(scriptUrl, {
@@ -2092,19 +2200,102 @@ function jsonResponse(obj) {
         const data = await response.json();
         if (data && data.ok) {
           appState.syncConfig.lastSync = new Date().toLocaleString('es-PE');
-          saveState();
+          saveState(false);
+          updateSyncIndicator('synced');
           renderSyncTab();
-          showToast(`¡Sincronizado! ${data.syncedCount} movimientos en Sheets`, 'success');
+          if (isManual) {
+            showToast(`¡Subido! ${data.syncedCount} movimientos guardados en Sheets`, 'success');
+          }
         } else {
-          showToast(data?.error || 'Error de autenticación o respuesta inválida', 'error');
+          updateSyncIndicator('error');
+          if (isManual) showToast(data?.error || 'Error de autenticación o respuesta inválida', 'error');
         }
       } catch (err) {
-        console.error(err);
-        showToast('No se pudo conectar. Verifica la URL y permisos de tu Apps Script.', 'error');
+        console.error('Error en pushToGoogleSheets:', err);
+        updateSyncIndicator('error');
+        if (isManual) {
+          showToast('No se pudo conectar. Verifica la URL (/exec) y permisos de tu Apps Script.', 'error');
+        }
       } finally {
-        btn.disabled = false;
-        btn.innerHTML = `<i data-lucide="refresh-cw" class="w-4 h-4"></i><span>Probar y Sincronizar con Sheets</span>`;
+        isSyncInFlight = false;
+        if (isManual && btn) {
+          btn.disabled = false;
+          btn.innerHTML = `<i data-lucide="cloud-upload" class="w-4 h-4"></i><span>Subir ahora</span>`;
+          if (window.lucide) lucide.createIcons();
+        }
+      }
+    }
+
+    async function pullFromGoogleSheets(isManual = false) {
+      if (isManual) saveSyncConfig();
+      if (!isSyncConfigured()) {
+        if (isManual) showToast('Configura tu URL y Token primero para descargar', 'error');
+        updateSyncIndicator('local');
+        return;
+      }
+      if (isSyncInFlight || autoPushTimer) return;
+
+      const { scriptUrl, token } = appState.syncConfig;
+      const btn = document.getElementById('btn-sync-pull');
+      isSyncInFlight = true;
+      updateSyncIndicator('loading');
+
+      if (isManual && btn) {
+        btn.disabled = true;
+        btn.innerHTML = `<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i><span>Descargando...</span>`;
         if (window.lucide) lucide.createIcons();
+      }
+
+      try {
+        const separator = scriptUrl.includes('?') ? '&' : '?';
+        const url = `${scriptUrl}${separator}token=${encodeURIComponent(token)}&t=${Date.now()}`;
+        const response = await fetch(url, { method: 'GET' });
+        const data = await response.json();
+
+        if (data && data.ok) {
+          lastPullTimestamp = Date.now();
+          if (data.hasData) {
+            if (Array.isArray(data.transactions)) {
+              appState.transactions = data.transactions;
+              appState.isDemo = false;
+            }
+            if (Array.isArray(data.goals) && data.goals.length > 0) {
+              appState.goals = data.goals;
+            }
+            if (data.budget && typeof data.budget === 'object') {
+              appState.budget = {
+                ...appState.budget,
+                ...data.budget
+              };
+            }
+          }
+          appState.syncConfig.lastSync = new Date().toLocaleString('es-PE');
+          saveState(false);
+          updateSyncIndicator('synced');
+          renderAll();
+          if (isManual) {
+            showToast(
+              data.hasData ? 'Datos descargados desde Google Sheets' : 'Conectado (tu hoja está vacía aún)',
+              'success'
+            );
+          }
+        } else {
+          updateSyncIndicator('error');
+          if (isManual) showToast(data?.error || 'Token inválido o error al leer Sheets', 'error');
+        }
+      } catch (err) {
+        console.error('Error en pullFromGoogleSheets:', err);
+        updateSyncIndicator('error');
+        if (isManual) {
+          showToast('Error al descargar desde Sheets. Revisa tu conexión o la versión publicada.', 'error');
+        }
+      } finally {
+        isSyncInFlight = false;
+        if (isManual && btn) {
+          btn.disabled = false;
+          btn.innerHTML = `<i data-lucide="cloud-download" class="w-4 h-4"></i><span>Descargar ahora</span>`;
+          if (window.lucide) lucide.createIcons();
+        }
       }
     }
 
@@ -2163,7 +2354,7 @@ function jsonResponse(obj) {
         () => {
           appState.transactions = [];
           appState.isDemo = false;
-          saveState();
+          saveState(true);
           renderAll();
           showToast('Datos de ejemplo limpiados. ¡Listo para tus finanzas reales!', 'success');
         }
@@ -2181,7 +2372,7 @@ function jsonResponse(obj) {
           const now = new Date();
           selectedYear = now.getFullYear();
           selectedMonth = now.getMonth();
-          saveState();
+          saveState(true);
           renderAll();
           showToast('Datos de ejemplo restaurados', 'info');
         }
@@ -2278,6 +2469,22 @@ function jsonResponse(obj) {
       });
 
       switchTab('dashboard');
+
+      // Auto-carga inicial desde Google Sheets si está configurado
+      if (isSyncConfigured() && appState.syncConfig.autoSync) {
+        pullFromGoogleSheets(false);
+      } else {
+        updateSyncIndicator(isSyncConfigured() ? 'synced' : 'local');
+      }
+
+      // Auto-carga al volver a la pestaña/app (con enfriamiento de 15 segundos)
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible' && isSyncConfigured() && appState.syncConfig.autoSync) {
+          if (Date.now() - lastPullTimestamp > 15000) {
+            pullFromGoogleSheets(false);
+          }
+        }
+      });
     });
   </script>
 </body>
